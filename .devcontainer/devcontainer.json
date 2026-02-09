@@ -36,5 +36,6 @@
     "runArgs": [
         "--env-file",
         "env.shared"
-    ]
+    ],
+    "postCreateCommand": "git config --global user.name 'Paul Larripa' && git config --global user.email 'plarrip@gmail.com'"
 }
