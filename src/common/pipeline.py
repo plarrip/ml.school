@@ -30,33 +30,40 @@ def dataset(step_name, flow, inputs=None, attr=None):  # noqa: ARG001
     """
     import numpy as np
 
-    # Let's check if the dataset file exists
-    if not Path(flow.dataset).exists():
-        # If we don't find the dataset file, we can set the artifact to None
-        # and let the step continue.
+    dataset_path = Path(flow.dataset)
+
+    #ASSIGNMENT 3.1
+    if dataset_path.is_dir():
+        files = sorted(dataset_path.glob("*.csv"))
+        if not files:
+            flow.data = None
+            yield
+            return
+        data = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+    elif dataset_path.is_file():
+        data = pd.read_csv(dataset_path)
+    else:
         flow.data = None
         yield
-    else:
-        # If we find the dataset file, we can load it and process it.
-        data = pd.read_csv(flow.dataset)
+        return
 
-        # Replace extraneous values in the sex column with NaN
-        data["sex"] = data["sex"].replace(".", np.nan)
+    # Replace extraneous values in the sex column with NaN
+    data["sex"] = data["sex"].replace(".", np.nan)
 
-        # We want to shuffle the dataset. For reproducibility, we can fix the seed value
-        # when running in development mode. When running in production mode, we can use
-        # the current time as the seed to ensure a different shuffle each time the
-        # pipeline is executed.
-        seed = int(time.time() * 1000) if current.is_production else 42
-        generator = np.random.default_rng(seed=seed)
-        data = data.sample(frac=1, random_state=generator)
+    # We want to shuffle the dataset. For reproducibility, we can fix the seed value
+    # when running in development mode. When running in production mode, we can use
+    # the current time as the seed to ensure a different shuffle each time the
+    # pipeline is executed.
+    seed = int(time.time() * 1000) if current.is_production else 42
+    generator = np.random.default_rng(seed=seed)
+    data = data.sample(frac=1, random_state=generator)
 
-        flow.logger.info("Loaded dataset with %d samples", len(data))
+    flow.logger.info("Loaded dataset with %d samples", len(data))
 
-        # Let's now create an artifact on the current flow so every step of the flow
-        # has access to it.
-        flow.data = data
-        yield
+    # Let's now create an artifact on the current flow so every step of the flow
+    # has access to it.
+    flow.data = data
+    yield
 
 
 @user_step_decorator
@@ -196,8 +203,8 @@ class Pipeline(FlowSpec):
 
     dataset = Parameter(
         "dataset",
-        help="Project dataset that will be used to train and evaluate the model.",
-        default="data/penguins.csv",
+        help="Folder containing the dataset CSV files used to train and evaluate the model.",
+        default="data",
     )
 
     mlflow_tracking_uri = Parameter(

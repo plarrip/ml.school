@@ -16,11 +16,39 @@ environment_variables = {
 }
 
 
-def build_features_transformer():
+class FeatureEngineer:
+    """Sklearn-compatible transformer that adds domain-specific engineered features.
+
+    New columns added:
+    - culmen_ratio: bill length / bill depth (captures bill shape, a key species trait)
+    - body_mass_index: body mass / flipper length (captures body density proxy)
+    """
+
+    def fit(self, X, y=None):  # noqa: ARG002, N803
+        """No fitting required; this transformer is stateless."""
+        return self
+
+    def transform(self, X):  # noqa: N803
+        """Append the engineered features and return the augmented DataFrame."""
+        result = X.copy()
+        result["culmen_ratio"] = result["culmen_length_mm"] / result["culmen_depth_mm"]
+        result["body_mass_index"] = result["body_mass_g"] / result["flipper_length_mm"]
+        return result
+
+    def get_params(self, deep=True):  # noqa: ARG002, FBT002
+        """Return empty params dict (required by sklearn clone/Pipeline)."""
+        return {}
+
+    def set_params(self, **params: object):  # noqa: ARG002
+        """No-op (required by sklearn Pipeline)."""
+        return self
+
+
+def build_features_transformer(feature_engineering=False):  # noqa: FBT002
     """Build a Scikit-Learn transformer to preprocess the feature columns."""
     from sklearn.compose import ColumnTransformer, make_column_selector
     from sklearn.impute import SimpleImputer
-    from sklearn.pipeline import make_pipeline
+    from sklearn.pipeline import Pipeline, make_pipeline
     from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
     numeric_transformer = make_pipeline(
@@ -36,7 +64,7 @@ def build_features_transformer():
         OneHotEncoder(handle_unknown="ignore"),
     )
 
-    return ColumnTransformer(
+    column_transformer = ColumnTransformer(
         transformers=[
             (
                 "numeric",
@@ -56,6 +84,14 @@ def build_features_transformer():
         ],
     )
 
+    if feature_engineering:
+        return Pipeline([
+            ("engineer", FeatureEngineer()),
+            ("transform", column_transformer),
+        ])
+
+    return column_transformer
+
 
 def build_target_transformer():
     """Build a Scikit-Learn transformer to preprocess the target column."""
@@ -67,9 +103,20 @@ def build_target_transformer():
     )
 
 
-def build_model(input_shape, learning_rate=0.01):
+def build_model(input_shape, learning_rate=0.01, learning_rate_decay=False):  # noqa: FBT002
     """Build and compile the neural network to predict the species of a penguin."""
     from keras import Input, layers, models, optimizers
+
+    if learning_rate_decay:
+        # Decay the learning rate by 4% every 100 steps so early training takes
+        # large steps and late training fine-tunes near the optimum.
+        lr = optimizers.schedules.ExponentialDecay(
+            initial_learning_rate=learning_rate,
+            decay_steps=100,
+            decay_rate=0.96,
+        )
+    else:
+        lr = learning_rate
 
     model = models.Sequential(
         [
@@ -81,7 +128,7 @@ def build_model(input_shape, learning_rate=0.01):
     )
 
     model.compile(
-        optimizer=optimizers.SGD(learning_rate=learning_rate),
+        optimizer=optimizers.SGD(learning_rate=lr),
         loss="sparse_categorical_crossentropy",
         metrics=["accuracy"],
     )
@@ -96,10 +143,28 @@ class Training(Pipeline):
     a given penguin.
     """
 
+    feature_engineering = Parameter(
+        "feature-engineering",
+        help="Enable domain-specific feature engineering (culmen ratio, body mass index).",  # noqa: E501
+        default=False,
+    )
+
+    learning_rate_decay = Parameter(
+        "learning-rate-decay",
+        help="Enable exponential decay of the learning rate during training.",
+        default=False,
+    )
+
     training_epochs = Parameter(
         "training-epochs",
-        help="Number of epochs that will be used to train the model.",
+        help="Maximum epochs to train; early stopping may halt sooner.",
         default=50,
+    )
+
+    early_stopping_patience = Parameter(
+        "early-stopping-patience",
+        help="Epochs without val_loss improvement before stopping training.",
+        default=5,
     )
 
     training_batch_size = Parameter(
@@ -135,6 +200,9 @@ class Training(Pipeline):
         except Exception as e:
             message = f"Failed to connect to MLflow server {self.mlflow_tracking_uri}."
             raise RuntimeError(message) from e
+
+        mlflow.log_param("feature_engineering", self.feature_engineering)
+        mlflow.log_param("learning_rate_decay", self.learning_rate_decay)
 
         # Now that everything is set up, we want to run a cross-validation process
         # to evaluate the model and train a final model on the entire dataset. Since
@@ -178,7 +246,7 @@ class Training(Pipeline):
 
         # Let's build the SciKit-Learn pipeline to process the feature columns,
         # fit it to the training data and transform both the training and test data.
-        features_transformer = build_features_transformer()
+        features_transformer = build_features_transformer(self.feature_engineering)
         self.x_train = features_transformer.fit_transform(train_data)
         self.x_test = features_transformer.transform(test_data)
 
@@ -223,28 +291,49 @@ class Training(Pipeline):
             # so we don't want to log that model because it's useless.
             mlflow.autolog(log_models=False)
 
-            # Let's now build and fit the model on the training data we processed in the
-            # previous step.
-            self.model = build_model(self.x_train.shape[1])
+            # Use the fold's test split as validation data so early stopping can monitor
+            # generalisation without touching the final evaluation metrics.
+            from keras.callbacks import EarlyStopping
+
+            self.model = build_model(self.x_train.shape[1], learning_rate_decay=self.learning_rate_decay)
             history = self.model.fit(
                 self.x_train,
                 self.y_train,
                 epochs=self.training_epochs,
                 batch_size=self.training_batch_size,
+                validation_data=(self.x_test, self.y_test),
+                callbacks=[
+                    EarlyStopping(
+                        monitor="val_loss",
+                        patience=self.early_stopping_patience,
+                        restore_best_weights=True,
+                    ),
+                ],
                 verbose=0,
             )
 
+            self.epochs_trained = len(history.history["loss"])
+            mlflow.log_metrics(
+                {
+                    "epochs_trained": self.epochs_trained,
+                    "val_loss": history.history["val_loss"][-1],
+                    "val_accuracy": history.history["val_accuracy"][-1],
+                },
+                run_id=self.mlflow_fold_run_id,
+            )
+
         self.logger.info(
-            "Fold %d - train_loss: %f - train_accuracy: %f",
+            "Fold %d - epochs: %d - train_loss: %f - val_loss: %f",
             self.fold,
+            self.epochs_trained,
             history.history["loss"][-1],
-            history.history["accuracy"][-1],
+            history.history["val_loss"][-1],
         )
 
         # After training a model for this fold, we want to evaluate it.
         self.next(self.evaluate_fold)
 
-    @card
+    @card(type="confusion_matrix")
     @environment(vars=environment_variables)
     @step
     def evaluate_fold(self):
@@ -254,6 +343,8 @@ class Training(Pipeline):
         the model using the test data associated with the current fold.
         """
         import mlflow
+        import numpy as np
+        from sklearn.metrics import confusion_matrix, precision_score, recall_score
 
         self.logger.info("Evaluating fold %d...", self.fold)
 
@@ -264,11 +355,24 @@ class Training(Pipeline):
             verbose=0,
         )
 
+        # Compute predictions once and reuse them for all metrics.
+        y_pred = np.argmax(self.model.predict(self.x_test, verbose=0), axis=1)
+        y_true = self.y_test.flatten().astype(int)
+
+        self.test_precision = precision_score(y_true, y_pred, average="weighted")
+        self.test_recall = recall_score(y_true, y_pred, average="weighted")
+
+        # Compute the confusion matrix for the card visualization.
+        self.confusion_matrix = confusion_matrix(y_true, y_pred)
+        self.confusion_matrix_labels = ["Adelie", "Chinstrap", "Gentoo"]
+
         self.logger.info(
-            "Fold %d - test_loss: %f - test_accuracy: %f",
+            "Fold %d - loss: %f - accuracy: %f - precision: %f - recall: %f",
             self.fold,
             self.test_loss,
             self.test_accuracy,
+            self.test_precision,
+            self.test_recall,
         )
 
         # Let's track the evaluation metrics under the nested MLflow run corresponding
@@ -277,6 +381,8 @@ class Training(Pipeline):
             {
                 "test_loss": self.test_loss,
                 "test_accuracy": self.test_accuracy,
+                "test_precision": self.test_precision,
+                "test_recall": self.test_recall,
             },
             run_id=self.mlflow_fold_run_id,
         )
@@ -305,9 +411,11 @@ class Training(Pipeline):
 
         self.test_accuracy, self.test_loss = np.mean(metrics, axis=0)
         self.test_accuracy_std, self.test_loss_std = np.std(metrics, axis=0)
+        self.mean_epochs_trained = int(np.mean([i.epochs_trained for i in inputs]))
 
         self.logger.info("Accuracy: %f ±%f", self.test_accuracy, self.test_accuracy_std)
         self.logger.info("Loss: %f ±%f", self.test_loss, self.test_loss_std)
+        self.logger.info("Mean epochs trained: %d", self.mean_epochs_trained)
 
         # Let's log the model metrics on the parent run.
         mlflow.log_metrics(
@@ -316,6 +424,7 @@ class Training(Pipeline):
                 "test_accuracy_std": self.test_accuracy_std,
                 "test_loss": self.test_loss,
                 "test_loss_std": self.test_loss_std,
+                "mean_epochs_trained": self.mean_epochs_trained,
             },
             run_id=self.mlflow_run_id,
         )
@@ -336,7 +445,7 @@ class Training(Pipeline):
         to transform the input data during inference.
         """
         # Let's build the SciKit-Learn pipeline and transform the dataset features.
-        self.features_transformer = build_features_transformer()
+        self.features_transformer = build_features_transformer(self.feature_engineering)
         self.x = self.features_transformer.fit_transform(self.data)
 
         # Let's build the SciKit-Learn pipeline and transform the target column.
@@ -356,18 +465,37 @@ class Training(Pipeline):
         self.logger.info("Training final model...")
 
         # Let's log the training process under the current MLflow run.
-        with mlflow.start_run(run_id=self.mlflow_run_id):
+        with mlflow.start_run(run_id=self.mlflow_run_id, log_system_metrics=True):
             # We want to log the model manually, so let's disable automatic logging.
             mlflow.autolog(log_models=False)
 
-            # Let's now build and fit the model on the entire dataset.
-            self.model = build_model(self.x.shape[1])
-            self.model.fit(
+            from keras.callbacks import EarlyStopping
+
+            self.model = build_model(self.x.shape[1], learning_rate_decay=self.learning_rate_decay)
+            history = self.model.fit(
                 self.x,
                 self.y,
                 epochs=self.training_epochs,
                 batch_size=self.training_batch_size,
+                validation_split=0.2,
+                callbacks=[
+                    EarlyStopping(
+                        monitor="val_loss",
+                        patience=self.early_stopping_patience,
+                        restore_best_weights=True,
+                    ),
+                ],
                 verbose=2,
+            )
+
+            epochs_trained = len(history.history["loss"])
+            self.logger.info("Trained for %d epochs.", epochs_trained)
+            mlflow.log_metrics(
+                {
+                    "epochs_trained": epochs_trained,
+                    "val_loss": history.history["val_loss"][-1],
+                    "val_accuracy": history.history["val_accuracy"][-1],
+                },
             )
 
         # After we finish training the model, we want to register it.
