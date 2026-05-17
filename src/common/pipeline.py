@@ -28,24 +28,39 @@ def dataset(step_name, flow, inputs=None, attr=None):  # noqa: ARG001
     with NaN, and shuffles the data before creating an artifact on the
     current flow.
     """
+    import io
+
     import numpy as np
 
-    dataset_path = Path(flow.dataset)
+    if current.is_production and flow.s3_uri:
+        from metaflow import S3
 
-    #ASSIGNMENT 3.1
-    if dataset_path.is_dir():
-        files = sorted(dataset_path.glob("*.csv"))
-        if not files:
+        with S3(s3root=flow.s3_uri) as s3:
+            objects = [o for o in s3.list_recursive() if o.key.endswith(".csv")]
+            if not objects:
+                flow.data = None
+                yield
+                return
+            data = pd.concat(
+                [pd.read_csv(io.StringIO(s3.get(o.key).text)) for o in objects],
+                ignore_index=True,
+            )
+    else:
+        dataset_path = Path(flow.dataset)
+
+        if dataset_path.is_dir():
+            files = sorted(dataset_path.glob("*.csv"))
+            if not files:
+                flow.data = None
+                yield
+                return
+            data = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+        elif dataset_path.is_file():
+            data = pd.read_csv(dataset_path)
+        else:
             flow.data = None
             yield
             return
-        data = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
-    elif dataset_path.is_file():
-        data = pd.read_csv(dataset_path)
-    else:
-        flow.data = None
-        yield
-        return
 
     # Replace extraneous values in the sex column with NaN
     data["sex"] = data["sex"].replace(".", np.nan)
@@ -203,8 +218,15 @@ class Pipeline(FlowSpec):
 
     dataset = Parameter(
         "dataset",
-        help="Folder containing the dataset CSV files used to train and evaluate the model.",
+        help="Folder containing the dataset CSV files used to train and evaluate the model.",  # noqa: E501
         default="data",
+    )
+
+    s3_uri = Parameter(
+        "s3-uri",
+        help="S3 URI (s3://bucket/prefix) to load CSVs from when running in production.",  # noqa: E501
+        default=None,
+        required=False,
     )
 
     mlflow_tracking_uri = Parameter(
