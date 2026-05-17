@@ -37,5 +37,5 @@
         "--env-file",
         "env.shared"
     ],
-    "postCreateCommand": "git config --global user.name 'Paul Larripa' && git config --global user.email 'plarrip@gmail.com'"
+    "postCreateCommand": "git config --global user.name 'Paul Larripa' && git config --global user.email 'plarrip@gmail.com' && git config --global --unset-all credential.helper || true"
 }
