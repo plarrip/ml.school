@@ -749,6 +749,268 @@ class Sagemaker(Backend):
         return pd.concat(dfs, ignore_index=True)
 
 
+class JSONLines(Backend):
+    """JSON Lines backend implementation.
+
+    A model with this backend will be deployed using `mlflow model serve` and will use
+    a JSON Lines file to store production data. Each line in the file is a JSON object
+    corresponding to one input request and its prediction.
+    """
+
+    def __init__(self, config: dict | None = None, logger=None) -> None:
+        """Initialize backend using the supplied configuration."""
+        self.logger = logger
+        self.target = (
+            config.get("target", "http://127.0.0.1:8080/invocations")
+            if config
+            else "http://127.0.0.1:8080/invocations"
+        )
+
+        self.file = "data/penguins.jsonl"
+
+        if config:
+            self.file = config.get("file", self.file)
+        else:
+            self.file = os.getenv("MODEL_BACKEND_FILE", self.file)
+
+        self._info(f"Backend file: {self.file}")
+
+    def load(self, limit: int = 100) -> pd.DataFrame | None:
+        """Load production data from a JSON Lines file."""
+        path = Path(self.file)
+        if not path.exists():
+            self._error(f"File {self.file} does not exist.")
+            return None
+
+        records = []
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+
+        if not records:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(records)
+        if "date" in df.columns:
+            df = df.sort_values("date", ascending=False)
+
+        return df.head(limit)
+
+    def save(self, model_input: pd.DataFrame, model_output: list) -> None:
+        """Append production data to a JSON Lines file."""
+        self._info("Storing production data in the JSON Lines file...")
+
+        try:
+            Path(self.file).parent.mkdir(parents=True, exist_ok=True)
+
+            data = model_input.copy()
+            data["date"] = datetime.now(UTC).isoformat()
+            data["prediction"] = None
+            data["confidence"] = None
+            data["target"] = None
+
+            if model_output is not None and len(model_output) > 0:
+                data["prediction"] = [item["prediction"] for item in model_output]
+                data["confidence"] = [item["confidence"] for item in model_output]
+
+            data["uuid"] = [str(uuid.uuid4()) for _ in range(len(data))]
+
+            with Path(self.file).open("a") as f:
+                for record in data.to_dict(orient="records"):
+                    f.write(json.dumps(record) + "\n")
+
+        except Exception:
+            self._exception("There was an error saving production data to the file.")
+
+    def label(self, ground_truth_quality: float = 0.8) -> int:
+        """Label every unlabeled sample stored in the JSON Lines file."""
+        path = Path(self.file)
+        if not path.exists():
+            self._error(f"File {self.file} does not exist.")
+            return 0
+
+        try:
+            records = []
+            with path.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        records.append(json.loads(line))
+
+            unlabeled_count = 0
+            for record in records:
+                if record.get("target") is None:
+                    record["target"] = self.get_fake_label(
+                        record.get("prediction"),
+                        ground_truth_quality,
+                    )
+                    unlabeled_count += 1
+
+            self._info(f"Labeled {unlabeled_count} unlabeled samples.")
+
+            with path.open("w") as f:
+                for record in records:
+                    f.write(json.dumps(record) + "\n")
+
+            return unlabeled_count
+
+        except Exception:
+            self._exception("There was an error labeling production data.")
+            return 0
+
+    def invoke(self, payload: list | dict) -> dict | None:
+        """Make a prediction request to the hosted model."""
+        import requests
+
+        self._info(f'Running prediction on "{self.target}"...')
+
+        try:
+            predictions = requests.post(
+                url=self.target,
+                headers={"Content-Type": "application/json"},
+                data=json.dumps({"inputs": payload}),
+                timeout=5,
+            )
+            return predictions.json()
+        except Exception:
+            self._exception("There was an error sending traffic to the endpoint.")
+            return None
+
+    def deploy(self, model_uri: str, model_version: str) -> None:
+        """Not Implemented.
+
+        Deploying a model is not applicable when serving the model directly.
+        """
+
+
+class CSV(Backend):
+    """CSV backend implementation.
+
+    A model with this backend will be deployed using `mlflow model serve` and will use
+    a CSV file to store production data. Each row corresponds to one input request and
+    its prediction. A timestamp column is included for each entry.
+    """
+
+    def __init__(self, config: dict | None = None, logger=None) -> None:
+        """Initialize backend using the supplied configuration."""
+        self.logger = logger
+        self.target = (
+            config.get("target", "http://127.0.0.1:8080/invocations")
+            if config
+            else "http://127.0.0.1:8080/invocations"
+        )
+
+        self.file = "data/penguins.csv"
+
+        if config:
+            self.file = config.get("file", self.file)
+        else:
+            self.file = os.getenv("MODEL_BACKEND_FILE", self.file)
+
+        self._info(f"Backend file: {self.file}")
+
+    def load(self, limit: int = 100) -> pd.DataFrame | None:
+        """Load production data from a CSV file."""
+        path = Path(self.file)
+        if not path.exists():
+            self._error(f"File {self.file} does not exist.")
+            return None
+
+        df = pd.read_csv(path)
+
+        if df.empty:
+            return df
+
+        if "date" in df.columns:
+            df = df.sort_values("date", ascending=False)
+
+        return df.head(limit)
+
+    def save(self, model_input: pd.DataFrame, model_output: list) -> None:
+        """Append production data to a CSV file."""
+        self._info("Storing production data in the CSV file...")
+
+        try:
+            Path(self.file).parent.mkdir(parents=True, exist_ok=True)
+
+            data = model_input.copy()
+            data["date"] = datetime.now(UTC).isoformat()
+            data["prediction"] = None
+            data["confidence"] = None
+            data["target"] = None
+
+            if model_output is not None and len(model_output) > 0:
+                data["prediction"] = [item["prediction"] for item in model_output]
+                data["confidence"] = [item["confidence"] for item in model_output]
+
+            data["uuid"] = [str(uuid.uuid4()) for _ in range(len(data))]
+
+            write_header = not Path(self.file).exists()
+            data.to_csv(self.file, mode="a", header=write_header, index=False)
+
+        except Exception:
+            self._exception("There was an error saving production data to the file.")
+
+    def label(self, ground_truth_quality: float = 0.8) -> int:
+        """Label every unlabeled sample stored in the CSV file."""
+        path = Path(self.file)
+        if not path.exists():
+            self._error(f"File {self.file} does not exist.")
+            return 0
+
+        try:
+            df = pd.read_csv(path, dtype={"target": "object"})
+
+            unlabeled = df["target"].isna()
+            unlabeled_count = unlabeled.sum()
+
+            self._info(f"Loaded {unlabeled_count} unlabeled samples.")
+
+            if unlabeled_count == 0:
+                return 0
+
+            df.loc[unlabeled, "target"] = df.loc[unlabeled].apply(
+                lambda row: self.get_fake_label(
+                    row["prediction"],
+                    ground_truth_quality,
+                ),
+                axis=1,
+            )
+
+            df.to_csv(path, index=False)
+            return int(unlabeled_count)
+
+        except Exception:
+            self._exception("There was an error labeling production data.")
+            return 0
+
+    def invoke(self, payload: list | dict) -> dict | None:
+        """Make a prediction request to the hosted model."""
+        import requests
+
+        self._info(f'Running prediction on "{self.target}"...')
+
+        try:
+            predictions = requests.post(
+                url=self.target,
+                headers={"Content-Type": "application/json"},
+                data=json.dumps({"inputs": payload}),
+                timeout=5,
+            )
+            return predictions.json()
+        except Exception:
+            self._exception("There was an error sending traffic to the endpoint.")
+            return None
+
+    def deploy(self, model_uri: str, model_version: str) -> None:
+        """Not Implemented.
+
+        Deploying a model is not applicable when serving the model directly.
+        """
+
+
 class Mock(Backend):
     """Mock implementation of the Backend abstract class.
 

@@ -1,7 +1,9 @@
 import json
 import os
+from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pandas as pd
 import pytest
 
 from inference.model import Model
@@ -216,3 +218,201 @@ class TestLog:
         """A None logger should not raise any exception."""
         backend.logger = None
         backend._log("test message", "info")
+
+
+SAMPLE_INPUT = pd.DataFrame(
+    [
+        {
+            "island": "Torgersen",
+            "culmen_length_mm": 39.1,
+            "culmen_depth_mm": 18.7,
+            "flipper_length_mm": 181.0,
+            "body_mass_g": 3750.0,
+            "sex": "MALE",
+        }
+    ]
+)
+
+SAMPLE_OUTPUT = [{"prediction": "Adelie", "confidence": 0.95}]
+
+
+class TestJSONLinesBackend:
+    """Tests for the JSONLines backend."""
+
+    @pytest.fixture
+    def backend(self, tmp_path):
+        from inference.backend import JSONLines
+
+        return JSONLines(config={"file": str(tmp_path / "penguins.jsonl")}, logger=None)
+
+    def test_load_returns_none_when_file_missing(self, backend):
+        """load() should return None when the file does not exist."""
+        result = backend.load()
+        assert result is None
+
+    def test_save_creates_file_and_appends_records(self, backend):
+        """save() should create the file and write one JSON line per input row."""
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+
+        lines = Path(backend.file).read_text().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["prediction"] == "Adelie"
+        assert record["confidence"] == 0.95
+        assert record["target"] is None
+        assert "uuid" in record
+        assert "date" in record
+
+    def test_save_appends_on_subsequent_calls(self, backend):
+        """save() called twice should result in two lines in the file."""
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+
+        lines = Path(backend.file).read_text().splitlines()
+        assert len(lines) == 2
+
+    def test_load_returns_dataframe_after_save(self, backend):
+        """load() should return a DataFrame with the saved records."""
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+        df = backend.load()
+
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 1
+        assert df.iloc[0]["prediction"] == "Adelie"
+
+    def test_load_respects_limit(self, backend):
+        """load() should return at most `limit` records."""
+        for _ in range(5):
+            backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+
+        df = backend.load(limit=3)
+        assert len(df) == 3
+
+    def test_label_returns_zero_when_file_missing(self, backend):
+        """label() should return 0 when the file does not exist."""
+        assert backend.label() == 0
+
+    def test_label_fills_unlabeled_records(self, backend):
+        """label() should assign a ground truth label to every unlabeled row."""
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+        count = backend.label(ground_truth_quality=1.0)
+
+        assert count == 1
+        record = json.loads(Path(backend.file).read_text().splitlines()[0])
+        assert record["target"] == "Adelie"
+
+    def test_label_skips_already_labeled_records(self, backend):
+        """label() should not relabel rows that already have a target."""
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+        backend.label(ground_truth_quality=1.0)
+        count = backend.label(ground_truth_quality=1.0)
+
+        assert count == 0
+
+    def test_invoke_returns_predictions(self, backend):
+        """invoke() should POST to the target and return the parsed JSON response."""
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.json.return_value = {"predictions": []}
+            result = backend.invoke([{"island": "Torgersen"}])
+
+        assert result == {"predictions": []}
+
+    def test_invoke_returns_none_on_exception(self, backend):
+        """invoke() should return None when the request fails."""
+        with patch("requests.post", side_effect=Exception("timeout")):
+            result = backend.invoke([])
+
+        assert result is None
+
+
+class TestCSVBackend:
+    """Tests for the CSV backend."""
+
+    @pytest.fixture
+    def backend(self, tmp_path):
+        from inference.backend import CSV
+
+        return CSV(config={"file": str(tmp_path / "penguins.csv")}, logger=None)
+
+    def test_load_returns_none_when_file_missing(self, backend):
+        """load() should return None when the file does not exist."""
+        result = backend.load()
+        assert result is None
+
+    def test_save_creates_file_with_header(self, backend):
+        """save() should create a CSV file with a header row."""
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+
+        df = pd.read_csv(backend.file)
+        assert len(df) == 1
+        assert "prediction" in df.columns
+        assert "date" in df.columns
+        assert "uuid" in df.columns
+
+    def test_save_appends_on_subsequent_calls(self, backend):
+        """save() called twice should result in two data rows."""
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+
+        df = pd.read_csv(backend.file)
+        assert len(df) == 2
+
+    def test_save_stores_prediction_and_confidence(self, backend):
+        """save() should correctly record prediction and confidence values."""
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+
+        df = pd.read_csv(backend.file)
+        assert df.iloc[0]["prediction"] == "Adelie"
+        assert df.iloc[0]["confidence"] == pytest.approx(0.95)
+
+    def test_load_returns_dataframe_after_save(self, backend):
+        """load() should return a DataFrame with the saved records."""
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+        df = backend.load()
+
+        assert isinstance(df, pd.DataFrame)
+        assert len(df) == 1
+
+    def test_load_respects_limit(self, backend):
+        """load() should return at most `limit` records."""
+        for _ in range(5):
+            backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+
+        df = backend.load(limit=2)
+        assert len(df) == 2
+
+    def test_label_returns_zero_when_file_missing(self, backend):
+        """label() should return 0 when the file does not exist."""
+        assert backend.label() == 0
+
+    def test_label_fills_unlabeled_records(self, backend):
+        """label() should assign a ground truth label to every unlabeled row."""
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+        count = backend.label(ground_truth_quality=1.0)
+
+        assert count == 1
+        df = pd.read_csv(backend.file)
+        assert df.iloc[0]["target"] == "Adelie"
+
+    def test_label_skips_already_labeled_records(self, backend):
+        """label() should not relabel rows that already have a target."""
+        backend.save(SAMPLE_INPUT, SAMPLE_OUTPUT)
+        backend.label(ground_truth_quality=1.0)
+        count = backend.label(ground_truth_quality=1.0)
+
+        assert count == 0
+
+    def test_invoke_returns_predictions(self, backend):
+        """invoke() should POST to the target and return the parsed JSON response."""
+        with patch("requests.post") as mock_post:
+            mock_post.return_value.json.return_value = {"predictions": []}
+            result = backend.invoke([{"island": "Torgersen"}])
+
+        assert result == {"predictions": []}
+
+    def test_invoke_returns_none_on_exception(self, backend):
+        """invoke() should return None when the request fails."""
+        with patch("requests.post", side_effect=Exception("timeout")):
+            result = backend.invoke([])
+
+        assert result is None
