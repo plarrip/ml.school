@@ -33,6 +33,13 @@ class Input(pydantic.BaseModel):
     body_mass_g: float | None = None
     sex: str | None = None
 
+    @pydantic.model_validator(mode="before")
+    @classmethod
+    def unwrap_numpy(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return {k: v.item() if hasattr(v, "item") else v for k, v in data.items()}
+        return data
+
 
 class Output(pydantic.BaseModel):
     """Prediction output that will be returned to the client.

@@ -52,7 +52,7 @@ test:
     uv run -- mlflow models serve \
         -m models:/penguins/$(curl -s -X GET "{{MLFLOW_TRACKING_URI}}/api/2.0/mlflow/registered-models/get-latest-versions" \
         -H "Content-Type: application/json" -d '{"name": "penguins"}' \
-        | jq -r '.model_versions[0].version') -h 0.0.0.0 -p 8080 --no-conda
+        | jq -r '.model_versions[0].version') -h 0.0.0.0 -p 8080 --no-conda --enable-mlserver -w 0
 
 # Invoke local running model with a sample request
 [group('serving')]
@@ -60,7 +60,16 @@ test:
     uv run -- curl -X POST http://0.0.0.0:8080/invocations \
         -H "Content-Type: application/json" \
         -d '{"inputs": [{"island": "Biscoe", "culmen_length_mm": 48.6, "culmen_depth_mm": 16.0, "flipper_length_mm": 230.0, "body_mass_g": 5800.0, "sex": "MALE" }]}'
-    echo "\n"
+
+# Send a batch of random samples from the dataset to the local running model
+[group('serving')]
+@batch n="5":
+    uv run src/scripts/sample.py --n {{n}}
+
+# Load test the local running model and report performance metrics
+[group('serving')]
+@load-test requests="100" concurrency="10":
+    uv run src/scripts/load_test.py --requests {{requests}} --concurrency {{concurrency}}
 
 # Display sample statistics from the local SQLite database
 [group('serving')]
