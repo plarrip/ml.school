@@ -159,7 +159,7 @@ class Local(Backend):
 
         query = (
             "SELECT island, sex, culmen_length_mm, culmen_depth_mm, flipper_length_mm, "
-            "body_mass_g, prediction, target FROM data "
+            "body_mass_g, prediction, target, date FROM data "
             "ORDER BY date DESC LIMIT ?;"
         )
 
