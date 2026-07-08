@@ -1,4 +1,5 @@
 set dotenv-load
+set dotenv-override
 set positional-arguments
 
 KERAS_BACKEND := env("KERAS_BACKEND", "tensorflow")
@@ -131,9 +132,12 @@ test:
 # Connect to the MLflow remote server
 [group('aws')]
 @aws-ssh:
-    ssh -i "mlschool.pem" ubuntu@$(aws cloudformation \
-        describe-stacks --stack-name mlflow \
-        --query "Stacks[0].Outputs[?OutputKey=='PublicDNS'].OutputValue" \
+    ssh -i "mlschool.pem" ubuntu@$(aws ec2 describe-instances \
+        --instance-ids $(aws cloudformation \
+            describe-stacks --stack-name mlflow \
+            --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
+            --output text) \
+        --query "Reservations[0].Instances[0].PublicDnsName" \
         --output text)
 
 # Deploy model to Sagemaker

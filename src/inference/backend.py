@@ -341,7 +341,7 @@ class Sagemaker(Backend):
 
         # We need to remove a few columns that are not needed for the monitoring tests
         # and return `limit` number of samples.
-        data = data.drop(columns=["date", "event_id", "confidence"])
+        data = data.drop(columns=["event_id", "confidence"])
 
         # We want to return `limit` number of samples.
         return data.head(limit)

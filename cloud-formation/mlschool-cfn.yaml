@@ -55,8 +55,16 @@ Resources:
                   - "cloudformation:DescribeStackEvents"
                   - "cloudformation:DescribeStackResource"
                   - "cloudformation:DescribeStackResources"
+                  - "cloudformation:ContinueUpdateRollback"
                 Resource:
                   - "*"
+
+              - Effect: "Allow"
+                Sid: "IAMSelfManage"
+                Action:
+                  - "iam:PutRolePolicy"
+                Resource:
+                  - "arn:aws:iam::544152740266:role/mlschool-Role-eLP9Os7W6k6R"
 
               - Effect: "Allow"
                 Sid: "Batch"
@@ -172,9 +180,15 @@ Resources:
                   - !Sub "arn:aws:ssm:${AWS::Region}::parameter/aws/service/canonical/ubuntu/server/*"
 
               - Effect: "Allow"
-                Sid: "States"
+                Sid: "StatesAccountLevel"
                 Action:
                   - "states:ListStateMachines"
+                Resource:
+                  - "*"
+
+              - Effect: "Allow"
+                Sid: "States"
+                Action:
                   - "states:DescribeStateMachine"
                   - "states:UpdateStateMachine"
                   - "states:StartExecution"
@@ -183,7 +197,15 @@ Resources:
                   - "states:StopExecution"
                 Resource:
                   - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:*'
-              
+
+              - Effect: "Allow"
+                Sid: "StatesExecutions"
+                Action:
+                  - "states:DescribeExecution"
+                  - "states:GetExecutionHistory"
+                Resource:
+                  - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:*'
+
               - Effect: "Allow"
                 Sid: "S3"
                 Action:
@@ -197,6 +219,22 @@ Resources:
                   - "s3:DeleteObject"
                 Resource:
                   - "arn:aws:s3:::*"
+
+              - Effect: "Allow"
+                Sid: "APIGateway"
+                Action:
+                  - "apigateway:GET"
+                Resource:
+                  - "*"
+
+              - Effect: "Allow"
+                Sid: "DynamoDB"
+                Action:
+                  - "dynamodb:PutItem"
+                  - "dynamodb:GetItem"
+                  - "dynamodb:UpdateItem"
+                Resource:
+                  - "*"
 
   # Create an S3 bucket with a unique name using the stack UUID suffix.
   Bucket:
