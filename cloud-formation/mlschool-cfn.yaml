@@ -76,7 +76,8 @@ Resources:
                   - "batch:RegisterJobDefinition"
                   - "batch:SubmitJob"
                   - "batch:DescribeComputeEnvironments"
-                Resource: 
+                  - "batch:UpdateComputeEnvironment"
+                Resource:
                   - "*"
 
               - Effect: "Allow"
