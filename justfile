@@ -196,6 +196,21 @@ test:
         --config project config/sagemaker.yml run \
         --backend backend.Sagemaker
 
+# One-time setup: create the ECR repo for the Batch image (if missing) and upload the
+# dataset to Metaflow's own S3 datastore bucket (already readable by the Batch task
+# role, unlike the mlschool project bucket -- see CLAUDE.md for why).
+[group('aws')]
+@aws-batch-setup:
+    aws ecr describe-repositories --repository-names {{BATCH_IMAGE_REPO}} >/dev/null 2>&1 || \
+        aws ecr create-repository --repository-name {{BATCH_IMAGE_REPO}}
+    BUCKET=$(aws cloudformation describe-stacks --stack-name metaflow \
+        --query "Stacks[0].Outputs[?OutputKey=='MetaflowDataStoreS3Url'].OutputValue" \
+        --output text | sed -E 's#^s3://([^/]+).*#\1#') && \
+    aws s3 cp data/penguins.csv "s3://$BUCKET/dataset/penguins.csv" && \
+    echo "" && \
+    echo "Add this to your .env:" && \
+    echo "DATASET_S3_URI=s3://$BUCKET/dataset"
+
 # Build and push the custom Docker image used by AWS Batch training/deployment tasks
 [group('aws')]
 @aws-batch-image:

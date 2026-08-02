@@ -58,6 +58,29 @@ export METAFLOW_PROFILE=production
 
 Remember to delete the `metaflow` CloudFormation stack as soon as you are done using it to avoid unnecessary charges. Check the [Cleaning up AWS resources](.guide/amazon-web-services/cleaning-up.md) section for more information.
 
+## One-time setup for remote execution
+
+Running pipelines with `--with batch` requires two things AWS Batch tasks can't get on their own:
+
+1. **A container image with the project's runtime dependencies.** The default AWS Batch image is a bare Python install, so `pandas`, `scikit-learn`, `keras`, etc. aren't available in it. This project builds its own image from [`docker/batch.Dockerfile`](docker/batch.Dockerfile) instead of relying on Metaflow's `@pypi`/`@conda` decorators, which also happen to have a bug misdetecting Linux ARM64 hosts as x86_64.
+2. **The dataset reachable from S3.** Metaflow only packages `.py`/`.R`/`.RDS` files to remote containers, so `data/penguins.csv` never makes it to a Batch task on its own.
+
+Run this once per `metaflow` stack (and again any time you recreate it, since the ECR repo and the stack's own S3 bucket are tied to that specific stack):
+
+```shell
+just aws-batch-setup
+```
+
+This creates the `mlschool-batch` ECR repository (if it doesn't already exist) and uploads `data/penguins.csv` to Metaflow's own S3 datastore bucket — deliberately not the `mlschool` project bucket, since the Batch task role's IAM permissions only cover Metaflow's own bucket (see `cloud-formation/mlschool-cfn.yaml`; the `mlschool` role can only manage its own IAM policy, so granting it access to a different bucket isn't possible with your own credentials). Copy the `DATASET_S3_URI` value it prints into your `.env` file.
+
+Then build and push the image itself:
+
+```shell
+just aws-batch-image
+```
+
+Both `just aws-train` and `just aws-deploy` (and their Step Functions equivalents below) rely on `DATASET_S3_URI` and the image pushed here.
+
 ## Running the Training pipeline remotely
 
 You can now run the [Training pipeline](src/pipelines/training.py) remotely by using the `--with batch` and `--with retry` parameters. These will mark every step of the flow with the `batch` and `retry` decorators, They will instruct Metaflow to run every step in AWS Batch and retry them if they fail:
