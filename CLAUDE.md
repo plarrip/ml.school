@@ -107,3 +107,10 @@ Write concise commit messages that focus on the "why" rather than the "what".
 **Import Errors**: Ensure you're using `uv run` for script execution and dependencies are synced with `uv sync`. The project relies on `PYTHONPATH=src`.
 
 **Metaflow Issues**: Verify installation with `uv run python -c "import metaflow; print('OK')"`. Check AWS credentials if using remote execution.
+
+**`--with batch` + `@pypi` on aarch64 (e.g. Apple Silicon dev containers)**: Metaflow 2.18.0's `conda_platform()` (`metaflow/plugins/pypi/utils.py`) hardcodes every Linux host as `linux-64`, never checking `platform.machine()`. On a real `aarch64` client this breaks dependency bootstrapping for `--with batch` runs in two ways:
+
+1. It downloads an x86_64 `micromamba` binary that can't run without Rosetta/qemu emulation (error: `rosetta error: failed to open elf at /lib64/ld-linux-x86-64.so.2`). Workaround: manually download the correct build (`https://micro.mamba.pm/api/micromamba/linux-aarch64/1.5.7`) and replace `~/.metaflowconfig/micromamba/bin/micromamba`.
+2. Even with the correct binary, `get_environment()` (`metaflow/plugins/pypi/conda_environment.py`) still uses the same buggy `conda_platform()` to decide the *local* platform to build a pip-resolution sandbox in. It thinks local == remote (`linux-64`), so it never builds a local `linux-aarch64` sandbox; `Micromamba.create()` then silently skips creation (real local platform ≠ requested `linux-64`), and `Pip.solve()` fails with `Unable to locate a Micromamba managed virtual environment for id ...`.
+
+This is a real bug in Metaflow 2.18.0, not a project misconfiguration — no local fix (cache clearing, env vars) resolves it since `conda_platform()` has no override hook. Options if you hit this: build a custom Docker image for the Batch job (bypasses `@pypi`/`@conda` bootstrapping entirely — the standard production approach anyway), monkey-patch `conda_platform()` in the installed package (won't survive `uv sync`), or check if a newer Metaflow release fixes aarch64 detection before bumping the pin in `pyproject.toml`.

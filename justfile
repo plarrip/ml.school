@@ -8,6 +8,12 @@ ENDPOINT_NAME := env("ENDPOINT_NAME", "penguins")
 BUCKET := env("BUCKET", "")
 AWS_REGION := env("AWS_REGION", "us-east-1")
 AWS_ROLE := env("AWS_ROLE", "")
+BATCH_IMAGE_REPO := env("BATCH_IMAGE_REPO", "mlschool-batch")
+BATCH_IMAGE_TAG := env("BATCH_IMAGE_TAG", "latest")
+# Dataset copy readable by the Metaflow Batch task role (the mlschool role can only
+# manage its own IAM policy, not grant itself access to other buckets, so we reuse
+# Metaflow's own S3 datastore bucket here instead of the mlschool project bucket).
+DATASET_S3_URI := env("DATASET_S3_URI", "s3://metaflow-metaflows3bucket-wree0waprafa/dataset")
 
 default:
     @just --list
@@ -190,27 +196,71 @@ test:
         --config project config/sagemaker.yml run \
         --backend backend.Sagemaker
 
+# Build and push the custom Docker image used by AWS Batch training/deployment tasks
+[group('aws')]
+@aws-batch-image:
+    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text) && \
+    IMAGE="$ACCOUNT_ID.dkr.ecr.{{AWS_REGION}}.amazonaws.com/{{BATCH_IMAGE_REPO}}:{{BATCH_IMAGE_TAG}}" && \
+    aws ecr get-login-password --region {{AWS_REGION}} | \
+        docker login --username AWS --password-stdin "$ACCOUNT_ID.dkr.ecr.{{AWS_REGION}}.amazonaws.com" && \
+    docker buildx build --platform linux/amd64 -t "$IMAGE" -f docker/batch.Dockerfile --push .
+
 # Run training pipeline in AWS
 [group('aws')]
 @aws-train:
-    METAFLOW_PROFILE=production uv run src/pipelines/training.py run \
-        --with batch \
+    METAFLOW_PROFILE=production uv run src/pipelines/training.py \
+        run \
+        --s3-uri {{DATASET_S3_URI}} \
+        --with batch:image="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.{{AWS_REGION}}.amazonaws.com/{{BATCH_IMAGE_REPO}}:{{BATCH_IMAGE_TAG}}" \
         --with retry
+
+# Create a state machine for the Training pipeline in AWS Step Functions
+[group('aws')]
+@aws-train-sfn-create:
+    METAFLOW_PROFILE=production uv run src/pipelines/training.py \
+        --with batch:image="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.{{AWS_REGION}}.amazonaws.com/{{BATCH_IMAGE_REPO}}:{{BATCH_IMAGE_TAG}}" \
+        step-functions create
+
+# Trigger the Training pipeline in AWS Step Functions
+[group('aws')]
+@aws-train-sfn-trigger:
+    METAFLOW_PROFILE=production uv run src/pipelines/training.py \
+        step-functions trigger \
+        --mlflow-tracking-uri {{MLFLOW_TRACKING_URI}} \
+        --s3-uri {{DATASET_S3_URI}}
+
+# Check the status of the most recent Training Step Functions execution
+[group('aws')]
+@aws-train-sfn-status:
+    aws stepfunctions describe-execution \
+        --execution-arn "$( \
+            aws stepfunctions list-executions \
+                --state-machine-arn "$( \
+                    aws stepfunctions list-state-machines \
+                        --query "stateMachines[?ends_with(name, '.Training')].stateMachineArn | [0]" \
+                        --output text \
+                )" \
+                --max-results 1 --no-paginate \
+                --query "executions[0].executionArn" \
+                --output text \
+        )"
 
 # Deploy model to Sagemaker
 [group('aws')]
 @aws-deploy:
     METAFLOW_PROFILE=production uv run src/pipelines/deployment.py \
-        --config-value project '{"target": "{{ENDPOINT_NAME}}", "data-capture-uri": "s3://{{BUCKET}}/datastore", "ground-truth-uri": "s3://{{BUCKET}}/ground-truth", "region": "{{AWS_REGION}}", "assume-role": "{{AWS_ROLE}}"}' \
+        --config-value project '{"project": "penguins", "backend": {"module": "backend.Sagemaker", "target": "{{ENDPOINT_NAME}}", "data-capture-uri": "s3://{{BUCKET}}/datastore", "ground-truth-uri": "s3://{{BUCKET}}/ground-truth", "region": "{{AWS_REGION}}", "assume-role": "{{AWS_ROLE}}"}}' \
         run \
         --backend backend.Sagemaker \
-        --with batch
+        --s3-uri {{DATASET_S3_URI}} \
+        --with batch:image="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.{{AWS_REGION}}.amazonaws.com/{{BATCH_IMAGE_REPO}}:{{BATCH_IMAGE_TAG}}"
 
 # Create a state machine for the deployment pipeline in AWS Step Functions
 [group('aws')]
 @aws-deploy-sfn-create:
     METAFLOW_PROFILE=production uv run src/pipelines/deployment.py \
-        --config-value project '{"target": "{{ENDPOINT_NAME}}", "data-capture-uri": "s3://{{BUCKET}}/datastore", "ground-truth-uri": "s3://{{BUCKET}}/ground-truth", "region": "{{AWS_REGION}}", "assume-role": "{{AWS_ROLE}}"}' \
+        --config-value project '{"project": "penguins", "backend": {"module": "backend.Sagemaker", "target": "{{ENDPOINT_NAME}}", "data-capture-uri": "s3://{{BUCKET}}/datastore", "ground-truth-uri": "s3://{{BUCKET}}/ground-truth", "region": "{{AWS_REGION}}", "assume-role": "{{AWS_ROLE}}"}}' \
+        --with batch:image="$(aws sts get-caller-identity --query Account --output text).dkr.ecr.{{AWS_REGION}}.amazonaws.com/{{BATCH_IMAGE_REPO}}:{{BATCH_IMAGE_TAG}}" \
         step-functions create
 
 # Trigger the deployment pipeline in AWS Step Functions
@@ -218,6 +268,23 @@ test:
 @aws-deploy-sfn-trigger:
     METAFLOW_PROFILE=production uv run src/pipelines/deployment.py \
         step-functions trigger \
-        --backend backend.Sagemaker
+        --backend backend.Sagemaker \
+        --s3-uri {{DATASET_S3_URI}}
+
+# Check the status of the most recent Deployment Step Functions execution
+[group('aws')]
+@aws-deploy-sfn-status:
+    aws stepfunctions describe-execution \
+        --execution-arn "$( \
+            aws stepfunctions list-executions \
+                --state-machine-arn "$( \
+                    aws stepfunctions list-state-machines \
+                        --query "stateMachines[?ends_with(name, '.Deployment')].stateMachineArn | [0]" \
+                        --output text \
+                )" \
+                --max-results 1 --no-paginate \
+                --query "executions[0].executionArn" \
+                --output text \
+        )"
 
 

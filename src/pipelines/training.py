@@ -9,6 +9,11 @@ from metaflow import (
     step,
 )
 
+# The `register` step needs the actual `inference/backend.py` and `inference/model.py`
+# files on disk (via `mlflow.pyfunc.log_model`). Metaflow only auto-packages modules
+# that are already imported by the time it builds the code package, so we import this
+# at the top level rather than lazily inside the step.
+import inference
 from common.pipeline import Pipeline, dataset
 
 environment_variables = {
@@ -532,15 +537,17 @@ class Training(Pipeline):
                 self.artifacts = self._get_model_artifacts(directory)
                 self.pip_requirements = self._get_model_pip_requirements()
 
-                # Let's point to the `/src` folder containing the pipeline code.
-                root = Path(__file__).parent.parent
-                self.code_paths = [(root / "inference" / "backend.py").as_posix()]
+                # Let's locate the `inference` package. We can't derive this from
+                # `__file__` because Metaflow doesn't preserve the local `src` layout
+                # when it packages and unpacks the code on a remote compute platform.
+                root = Path(inference.__file__).parent
+                self.code_paths = [(root / "backend.py").as_posix()]
 
                 # We can now register the model in the model registry. This will
                 # automatically create a new version of the model.
                 mlflow.pyfunc.log_model(
                     name="model",
-                    python_model=root / "inference" / "model.py",
+                    python_model=root / "model.py",
                     registered_model_name="penguins",
                     code_paths=self.code_paths,
                     artifacts=self.artifacts,

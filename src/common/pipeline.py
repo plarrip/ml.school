@@ -3,7 +3,6 @@ import os
 import re
 import sys
 import time
-from contextlib import suppress
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +18,12 @@ from metaflow import (
     user_step_decorator,
 )
 
+# The `backend` decorator below needs the `inference` package available at task
+# runtime (both locally and on remote compute platforms). Metaflow only auto-packages
+# modules that are already imported by the time it builds the code package, so we
+# import this eagerly here rather than lazily inside the decorator.
+import inference  # noqa: F401
+
 
 @user_step_decorator
 def dataset(step_name, flow, inputs=None, attr=None):  # noqa: ARG001
@@ -32,7 +37,7 @@ def dataset(step_name, flow, inputs=None, attr=None):  # noqa: ARG001
 
     import numpy as np
 
-    if current.is_production and flow.s3_uri:
+    if flow.s3_uri:
         from metaflow import S3
 
         with S3(s3root=flow.s3_uri) as s3:
@@ -125,13 +130,6 @@ def backend(step_name, flow, inputs=None, attributes=None):  # noqa: ARG001
     an instance of the backend implementation class. We'll create an artifact
     so every step in the flow has access to it.
     """
-    # For the configuration to remain clean and easy to remember, we want to
-    # reference backend classes as "backend.<class_name>" without having to include
-    # their full class path. To accomplish this, we need to import the
-    # inference.backend module so it's available to the `import_module` call.
-    with suppress(ImportError):
-        import inference.backend  # noqa: F401
-
     try:
         # Let's import the module containing the backend implementation.
         module, cls = flow.backend.rsplit(".", 1)
