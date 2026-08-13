@@ -28,6 +28,8 @@ class Game(BaseAgent):
     validate player moves, and determine the outcome of the game.
     """
 
+    # BaseAgent is a Pydantic model, so these are declared, validated fields
+    # rather than plain attributes — see super().__init__() below.
     player1: LlmAgent
     player2: LlmAgent
     commentator: LlmAgent
@@ -41,9 +43,11 @@ class Game(BaseAgent):
         commentator: LlmAgent,
     ) -> None:
         """Initialize the game."""
-        # Let's start by initializing an empty board.
         board = [0] * 9
 
+        # Pydantic's own __init__ does the real validation and assignment of
+        # the fields declared above; without calling it, self.player1 etc.
+        # would never actually get set on the instance.
         super().__init__(
             name=name,
             player1=player1,
@@ -53,15 +57,20 @@ class Game(BaseAgent):
             sub_agents=[player1, player2, commentator],
         )
 
+    # Static-analysis-only marker confirming this overrides BaseAgent's method
+    # of the same name; it has no effect at runtime.
     @override
     async def _run_async_impl(
         self, ctx: InvocationContext
     ) -> AsyncGenerator[Event, None]:
+        # ctx carries this invocation's session (and its shared state dict)
+        # plus the session_service used to persist events.
         state = ctx.session.state
 
         # We can run this game agent in either LIVE or MOCK mode. In LIVE mode,
         # the game will be played out between the two players. In MOCK mode, we will
         # randomly select a winner without actually playing the game.
+        # .get(key, default) avoids a KeyError when "mode" hasn't been set yet.
         mode = state.get("mode", "LIVE")
         logger.info("Starting game. Mode: %s", mode)
 
@@ -95,11 +104,15 @@ class Game(BaseAgent):
 
                 # Let's call the appropriate player agent to make a move.
                 player = self.player1 if current_player == 1 else self.player2
+                # run_async starts the player LlmAgent (an actual LLM call) and
+                # returns an async generator of Events; async for streams them
+                # in as they're produced instead of waiting for all of them.
                 async for event in player.run_async(ctx):
                     yield event
 
                 # After the player agent finishes, we can access its move from the
-                # session state.
+                # session state. ADK writes it into state["turn"] automatically
+                # because the player agents declare output_key="turn".
                 turn = state["turn"]
                 position = turn["position"]
 
@@ -135,6 +148,7 @@ class Game(BaseAgent):
                 # the move that just happened. The commentator will use the "outcome"
                 # to contextualize its commentary.
                 state["outcome"] = result if result is not None else "ONGOING"
+                # Same run_async/async for streaming pattern as the player call above.
                 async for event in self.commentator.run_async(ctx):
                     yield event
 
@@ -152,6 +166,8 @@ class Game(BaseAgent):
         # Let's create an event to update the system state with the result of
         # the game.
         event = self._create_event(result)
+        # A single one-shot async I/O call (unlike the streamed async for loops
+        # above) — await pauses here until the write completes.
         await ctx.session_service.append_event(ctx.session, event)
 
     def _mock_play(self) -> str:

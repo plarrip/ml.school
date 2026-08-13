@@ -1,16 +1,43 @@
+import asyncio
+import re
 from pathlib import Path
 
 import markdown
 from google.adk.agents import LlmAgent, SequentialAgent
-from google.adk.models.lite_llm import LiteLlm
+from google.adk.models.lite_llm import LiteLlm, LiteLLMClient
 from google.adk.tools.tool_context import ToolContext
 from langchain_community.vectorstores import FAISS
+from litellm.exceptions import RateLimitError
 
 from common.embeddings import CustomEmbeddingModel
 
 from .prompts import FORMATTER_INSTRUCTIONS, RETRIEVER_INSTRUCTIONS
 
-EMBEDDING_MODEL = "gemini/text-embedding-004"
+EMBEDDING_MODEL = "gemini/gemini-embedding-001"
+
+MAX_RATE_LIMIT_RETRIES = 5
+_RETRY_DELAY_PATTERN = re.compile(r'"retryDelay":\s*"(\d+)s"')
+
+
+class RateLimitAwareLiteLLMClient(LiteLLMClient):
+    """LiteLLM client that honors the Gemini API's suggested retry delay.
+
+    Google's free-tier Gemini API returns a "retryDelay" hint in the error
+    body when it rate-limits a request, but LiteLLM's built-in retry logic
+    doesn't parse it and gives up too soon, so we parse it ourselves and
+    sleep the exact suggested amount before retrying.
+    """
+
+    async def acompletion(self, model, messages, tools, **kwargs):
+        for attempt in range(MAX_RATE_LIMIT_RETRIES):
+            try:
+                return await super().acompletion(model, messages, tools, **kwargs)
+            except RateLimitError as error:
+                match = _RETRY_DELAY_PATTERN.search(str(error))
+                if match is None or attempt == MAX_RATE_LIMIT_RETRIES - 1:
+                    raise
+                await asyncio.sleep(int(match.group(1)) + 1)
+        return None
 
 
 def retrieve_content(tool_context: ToolContext, question: str) -> list[dict[str, str]]:  # noqa: ARG001
@@ -62,10 +89,11 @@ def markdown_to_html(tool_context: ToolContext, text: str) -> str:  # noqa: ARG0
         return text
 
 
-def base_agent(model: str = "gemini/gemini-2.5-flash"):
+# def base_agent(model: str = "gemini/gemini-3.5-flash"):
+def base_agent(model: str = "gemini/gemini-3.5-flash-lite"):
     """Create the Retrieval-Augmented Generation agent."""
     retriever_agent = LlmAgent(
-        model=LiteLlm(model=model),
+        model=LiteLlm(model=model, llm_client=RateLimitAwareLiteLLMClient()),
         name="retriever",
         description="Answers user questions about the program.",
         instruction=RETRIEVER_INSTRUCTIONS,
@@ -74,7 +102,7 @@ def base_agent(model: str = "gemini/gemini-2.5-flash"):
     )
 
     formatter_agent = LlmAgent(
-        model=LiteLlm(model=model),
+        model=LiteLlm(model=model, llm_client=RateLimitAwareLiteLLMClient()),
         name="formatter",
         description="Formats the answers coming from the retriever.",
         instruction=FORMATTER_INSTRUCTIONS,

@@ -101,7 +101,7 @@ class Rag(Pipeline):
     model = Parameter(
         name="model",
         help="The underlying model that will be used by the agent.",
-        default="gemini/gemini-2.5-flash",
+        default="gemini/gemini-3.5-flash",
     )
 
     template = Config("template", default="config/rag.html", parser=read_template)

@@ -21,7 +21,7 @@ The pipeline supports configurable parameters for both the documentation locatio
 ```shell
 uv run src/pipelines/indexing.py run \
     --location docs/ \
-    --embedding-model gemini/text-embedding-004
+    --embedding-model gemini/gemini-embedding-001
 ```
 
 To display the supported parameters of the Indexing pipeline, run the following command:
@@ -43,7 +43,7 @@ After the card server is running, open your browser and navigate to [localhost:8
 The Indexing pipeline supports two main configuration parameters:
 
 - **`location`**: The directory containing documentation files (default: `.guide/`)
-- **`embedding-model`**: The model used for generating embeddings (default: `gemini/text-embedding-004`)
+- **`embedding-model`**: The model used for generating embeddings (default: `gemini/gemini-embedding-001`)
 
 You can experiment with different embedding models by specifying alternative models supported by LiteLLM:
 

@@ -24,7 +24,7 @@ class Indexing(Pipeline):
     embedding_model = Parameter(
         "embedding-model",
         help="The model to use for generating embeddings.",
-        default="gemini/text-embedding-004",
+        default="gemini/gemini-embedding-001",
     )
 
     @step
